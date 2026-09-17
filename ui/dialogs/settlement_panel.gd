@@ -31,14 +31,16 @@ func show_result(result: Dictionary, prev_levels: Dictionary, side_names: Array)
 	var dry := bool(result.get("dry_pot", false))
 	_add_info("抓分方（%s）桌面得分 %d" % [side_names[catcher], int(in_play[catcher])])
 	if kongdi:
-		_add_info("抠底成功：底牌 %d 分翻倍计入（§8）" % bottom_score)
+		var kongdi_label := _add_info("抠底成功：底牌 %d 分翻倍计入（§8）" % bottom_score)
+		kongdi_label.add_theme_color_override("font_color", Color(0.55, 0.95, 0.5))
 	else:
 		_add_info("保底：底牌 %d 分按面值归庄家方（§8）" % bottom_score)
 	var total_label := _add_info("抓分方总分 S = %d" % s)
 	total_label.add_theme_font_size_override("font_size", 20)
 	_add_info(str(BRANCH_TEXTS.get(branch, "")))
 	if dry:
-		_add_info("干锅局：底牌王不追加升级、不算血（§6.4）")
+		var dry_label := _add_info("干锅局：底牌王不追加升级、不算血（§6.4）")
+		dry_label.add_theme_color_override("font_color", Color(1.0, 0.6, 0.3))
 	var post := {dealer_side: int(result.get("dealer_level", 0)),
 		catcher: int(result.get("catcher_level", 0))}
 	for side in [0, 1]:
@@ -47,7 +49,8 @@ func show_result(result: Dictionary, prev_levels: Dictionary, side_names: Array)
 		if before == after:
 			_add_info("%s 级别 %d（不变）" % [side_names[side], after])
 		else:
-			_add_info("%s 级别 %d → %d" % [side_names[side], before, after])
+			var level_label := _add_info("%s 级别 %d → %d" % [side_names[side], before, after])
+			level_label.add_theme_color_override("font_color", Color(0.6, 0.9, 1.0))
 	var nt: Dictionary = result.get("next_tribute", {})
 	var big := int(nt.get("bonus_big", 0))
 	var small := int(nt.get("bonus_small", 0))
@@ -65,7 +68,8 @@ func show_result(result: Dictionary, prev_levels: Dictionary, side_names: Array)
 		var winner := int(result.get("match_winner", 0))
 		var winner_side := dealer_side if winner == Settlement.Winner.DEALER_SIDE else catcher
 		var win_label := _add_info("【%s 赢得整场比赛】" % side_names[winner_side])
-		win_label.add_theme_font_size_override("font_size", 24)
+		win_label.add_theme_font_size_override("font_size", 28)
+		win_label.add_theme_color_override("font_color", Color(1.0, 0.85, 0.3))
 		button.text = "新比赛"
 		var menu_button := Button.new()
 		menu_button.text = "回主菜单"

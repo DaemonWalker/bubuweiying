@@ -16,6 +16,7 @@ func _init() -> void:
 		"res://tests/test_round_state.gd",
 		"res://tests/test_match_state.gd",
 		"res://tests/test_ai_match.gd",
+		"res://tests/test_ai_stress.gd",
 		"res://tests/test_save_system.gd",
 	]
 	for path in suite_paths:

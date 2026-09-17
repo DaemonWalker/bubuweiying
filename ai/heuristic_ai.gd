@@ -5,6 +5,7 @@ extends AIPlayer
 ## - 进贡：贡手中最大的非分牌；多张时首贡手贡一半（向下取整）、末位补足（§5 约定分摊）。
 ## - 还贡：最小的非分副牌（§5）。
 ## - 扣底：优先非分副牌；主牌够强时扣王赌保底（§6.2 先大王后小王），留副牌防干锅（§6.4）。
+## - 其他家扣王：庄家方加码已亮底的底牌；抓分方主牌够强时扣王赌抠底（§8 分支4/分支3）。
 ## - 出牌：领出优先"无人能压"的滚子/棒子（记牌判定），否则非分小牌单张试探；
 ##   跟牌能赢则最小代价赢，队友已赢则喂分，赢不了垫最小非分牌（§7）；
 ##   末轮（手牌 ≤3）出最大牌型抢抠底/保底（§8）。
@@ -14,6 +15,7 @@ const BID_LEVEL_2_MIN := 15
 const BID_LEVEL_3_MIN := 14
 const REBID_EXTRA := 1  # 反主（已有人叫价）时的阈值加成
 const BOTTOM_JOKER_TRUMP_MIN := 20  # 庄家扣王赌保底所需的主牌张数（45 张中）
+const CATCHER_JOKER_TRUMP_MIN := 18  # 抓分方扣王赌抠底所需的主牌张数（39 张中）
 const LAST_TRICK_HAND := 3  # 手牌 ≤ 3 即最后一轮
 const DECK_COPIES := 3  # 每种牌 3 个副本（3 副牌）
 
@@ -145,15 +147,22 @@ func decide_bottom_joker(round_state: RoundState, seat: int) -> Dictionary:
 			return Play.power(a, level, trump) < Play.power(b, level, trump))
 		var count: int = comp.get("count", 0)
 		return {"type": RoundState.ActionType.PICK_COMPENSATION, "cards": candidates.slice(0, count)}
-	# 仅庄家方在底牌已公开（庄家已扣王）时追加扣王加码王奖励；抓分方不扣（简化策略）
-	if RoundState.side_of(seat) != round_state.get_dealer_side() or not round_state.is_bottom_public():
+	# 规则 §6.3：庄家方仅在底牌已公开（庄家已扣王）时追加扣王加码王奖励；
+	# 抓分方主牌够强时也扣全部王，赌 §8 分支4 王追加升级与分支3 的 3 大王特殊结束
+	var is_dealer_side := RoundState.side_of(seat) == round_state.get_dealer_side()
+	if is_dealer_side and not round_state.is_bottom_public():
 		return {"type": RoundState.ActionType.PASS}
 	var discarding: Array[Card] = []
+	var trump_count := 0
 	for card in round_state.get_hand(seat):
 		if card.is_joker():
 			discarding.append(card)  # 全部扣入，大王全在其中必满足 §6.2 先大王后小王
+		if Play.is_trump(card, level, trump):
+			trump_count += 1
 	if discarding.is_empty():
 		return {"type": RoundState.ActionType.PASS}
+	if not is_dealer_side and trump_count < CATCHER_JOKER_TRUMP_MIN:
+		return {"type": RoundState.ActionType.PASS}  # 手牌不强不赌：扣王会削弱牌力且可能资敌（§8 分支7）
 	var simulated := round_state.get_bottom()
 	simulated.append_array(discarding)
 	if Bottom.is_dry_pot(simulated, level, trump):

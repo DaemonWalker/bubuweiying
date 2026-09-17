@@ -12,15 +12,17 @@ const PLAYER_SEAT := 0
 const AI_SEATS := [1, 2, 3]
 const SEAT_NAMES := ["南（你）", "西", "北（队友）", "东"]
 const SIDE_NAMES := ["南北方（我方）", "东西方（对方）"]
-const DEAL_INTERVAL := 0.5  # 规则 §4.1：发牌动画约 1 秒 2 张
-const AI_THINK_MIN := 0.5
-const AI_THINK_MAX := 1.0
+const DEAL_INTERVAL := 0.5  # 规则 §4.1：发牌动画约 1 秒 2 张（可点“跳过发牌”快进）
+const AI_THINK_MIN := 0.4
+const AI_THINK_MAX := 1.3
 const AUTO_STEP_DELAY := 0.4
 const TRICK_COLLECT_DELAY := 0.9
 const PLAY_TWEEN_TIME := 0.25
+const COLLECT_TWEEN_TIME := 0.35
 const BIDDING_SECONDS := 5.0  # 规则 §4.3：定主倒计时，每次亮/反重置
 const BID_TICK := 0.1
-const AI_BID_DELAY := 0.6
+const AI_BID_MIN := 0.8  # AI 亮/反的拟人化犹豫区间
+const AI_BID_MAX := 2.0
 const TRUMP_ANNOUNCE_DELAY := 1.2
 const HAND_WIDTH := 1200.0
 const SELECT_LIFT := 16.0
@@ -41,6 +43,8 @@ var _round_prev_levels := {}  # 绝对 side -> 本局开始时级别（结算面
 var _tribute_total := 0
 var _match_progress_applied := false  # 本局结果是否已提交 MatchState（防重复 finish_round）
 var _exit_armed := false  # “退出比赛”二次确认
+var _deal_fast := false  # “跳过发牌”：快进剩余发牌（无动画、无间隔）
+var _dry_pot_announced := false  # 干锅强调只播一次
 
 var _hand_views: Array[CardView] = []
 var _selected: Array[CardView] = []
@@ -57,6 +61,7 @@ var _status_label: Label
 var _hint_label: Label
 var _play_button: Button
 var _exit_button: Button
+var _skip_deal_button: Button
 var _seat_labels: Array[Label] = []
 var _count_labels: Array[Label] = []
 var _bid_panel: BidPanel
@@ -80,6 +85,9 @@ func _start_round(config: Dictionary) -> void:
 	_match_progress_applied = false
 	_exit_armed = false
 	_exit_button.text = "退出比赛"
+	_deal_fast = false
+	_dry_pot_announced = false
+	_skip_deal_button.visible = true
 	_rs = RoundState.new(config)
 	_ais.clear()
 	for seat in AI_SEATS:
@@ -146,6 +154,13 @@ func _build_ui() -> void:
 	_exit_button.size = Vector2(110, 36)
 	_exit_button.pressed.connect(_on_exit_pressed)
 	add_child(_exit_button)
+	_skip_deal_button = Button.new()
+	_skip_deal_button.text = "跳过发牌"
+	_skip_deal_button.position = Vector2(720, 500)
+	_skip_deal_button.size = Vector2(160, 40)
+	_skip_deal_button.visible = false
+	_skip_deal_button.pressed.connect(_on_skip_deal_pressed)
+	add_child(_skip_deal_button)
 	var label_pos := [Vector2(1150, 856), Vector2(50, 380), Vector2(725, 16), Vector2(1430, 380)]
 	for seat in RoundState.PLAYER_COUNT:
 		_seat_labels.append(_make_label(label_pos[seat], Vector2(160, 26), HORIZONTAL_ALIGNMENT_CENTER))
@@ -194,12 +209,15 @@ func _run_dealing(gen: int) -> void:
 		_rs.apply_action(0, {"type": A.DEAL})
 		var seat := dealt % RoundState.PLAYER_COUNT
 		dealt += 1
-		_animate_deal(seat)
+		if not _deal_fast:
+			_animate_deal(seat)
 		for s in AI_SEATS:
 			var bid: Dictionary = (_ais[s] as HeuristicAI).decide_bid(_rs, s)
 			if not bid.is_empty() and _rs.apply_action(s, bid):
 				_announce_bid(s, bid)
 		_bottom_snapshot = _rs.get_bottom()
+		if _deal_fast:
+			continue  # 跳过发牌：快进剩余牌，发完统一刷新
 		if seat == PLAYER_SEAT:
 			_refresh_hand()
 		_refresh_seat_counts()
@@ -207,6 +225,7 @@ func _run_dealing(gen: int) -> void:
 		await get_tree().create_timer(DEAL_INTERVAL).timeout
 	if gen != _generation:
 		return
+	_skip_deal_button.visible = false
 	_refresh_all()
 	_run_pre_play(gen)
 
@@ -229,6 +248,7 @@ func _run_pre_play(gen: int) -> void:
 	while gen == _generation and _rs.get_phase() == P.BOTTOM:
 		await _bottom_step(gen)
 		_refresh_all()
+		_announce_dry_pot()
 		await get_tree().create_timer(AUTO_STEP_DELAY).timeout
 	if gen != _generation:
 		return
@@ -238,6 +258,7 @@ func _run_pre_play(gen: int) -> void:
 
 
 # 规则 §4.3：发牌后亮主/反主倒计时窗口，每次亮/反重置，超时 close_bidding()。
+# AI 亮/反带随机犹豫（AI_BID_MIN~MAX），倒计时只在无人犹豫时走表。
 func _run_bidding_window(gen: int) -> void:
 	_bid_time_left = BIDDING_SECONDS
 	_ai_bid_pending = true
@@ -245,12 +266,14 @@ func _run_bidding_window(gen: int) -> void:
 	while gen == _generation and _rs.get_phase() == P.BIDDING:
 		if _ai_bid_pending:
 			_ai_bid_pending = false
+			await get_tree().create_timer(_rng.randf_range(AI_BID_MIN, AI_BID_MAX)).timeout
+			if gen != _generation or _rs.get_phase() != P.BIDDING:
+				break
 			var bidder := _ai_bid_once()
 			if bidder >= 0:
 				_bid_time_left = BIDDING_SECONDS
 				_ai_bid_pending = true
 				_refresh_bid_panel()
-				await get_tree().create_timer(AI_BID_DELAY).timeout
 				continue
 		await get_tree().create_timer(BID_TICK).timeout
 		if gen != _generation or _rs.get_phase() != P.BIDDING:
@@ -500,6 +523,7 @@ func _advance_play(gen: int) -> void:
 
 func _after_play(seat: int, cards: Array[Card], gen: int, scores_before: Array) -> void:
 	_show_trick_play(seat, cards)
+	_play_sfx(Sfx.card_play())
 	if seat == PLAYER_SEAT:
 		_selected.clear()
 		_refresh_hand()
@@ -511,17 +535,34 @@ func _after_play(seat: int, cards: Array[Card], gen: int, scores_before: Array) 
 		var gained: int = (_rs.get_side_score(0) - scores_before[0]) \
 			+ (_rs.get_side_score(1) - scores_before[1])
 		_set_status("%s 赢得本轮，收走 %d 分" % [SEAT_NAMES[winner], gained])
+		if gained > 0:
+			_float_score(winner, gained)
+			_play_sfx(Sfx.score())
 		await get_tree().create_timer(TRICK_COLLECT_DELAY).timeout
 		if gen != _generation:
 			return
-		_clear_trick_views()
+		_collect_trick_views(winner)
 
 
 func _show_settlement() -> void:
 	_player_turn = false
 	_update_play_button()
 	_bid_panel.hide_panel()
-	_settlement_panel.show_result(_rs.get_result(), _round_prev_levels, SIDE_NAMES)
+	var result := _rs.get_result()
+	if bool(result.get("kongdi", false)):
+		_announce("抠底！底牌分翻倍（§8）")
+		_play_sfx(Sfx.score())
+	if bool(result.get("match_over", false)):
+		var dealer_side := int(result.get("dealer_side", 0))
+		var winner_side := dealer_side if int(result.get("match_winner", 0)) \
+			== Settlement.Winner.DEALER_SIDE else 1 - dealer_side
+		if winner_side == 0:
+			_announce("比赛结束：我方获胜！", Color(1.0, 0.85, 0.3))
+			_play_sfx(Sfx.match_win())
+		else:
+			_announce("比赛结束：对方获胜", Color(1.0, 0.5, 0.4))
+			_play_sfx(Sfx.match_lose())
+	_settlement_panel.show_result(result, _round_prev_levels, SIDE_NAMES)
 
 
 # 结算面板“下一局”（比赛未结束）：推进 MatchState 并自动存档，再开下一局；
@@ -566,6 +607,14 @@ func _on_exit_pressed() -> void:
 			_exit_button.text = "退出比赛"
 		return
 	Game.quit_to_menu()
+
+
+# “跳过发牌”：快进剩余发牌（逻辑照常、AI 仍可抢亮），发完统一刷新视图。
+func _on_skip_deal_pressed() -> void:
+	if _rs == null or _rs.get_phase() != P.DEALING:
+		return
+	_deal_fast = true
+	_skip_deal_button.visible = false
 
 
 # --- 玩家交互 ---
@@ -793,3 +842,74 @@ func _clear_trick_views() -> void:
 	_trick_views.clear()
 	for i in RoundState.PLAYER_COUNT:
 		_trick_views.append([])
+
+
+# 收分动画：本轮牌飞向赢家座位并淡出（数组立即清空，飞行与下一手并行）。
+func _collect_trick_views(winner: int) -> void:
+	var target: Vector2 = SEAT_ANCHORS[winner] - CardView.DEFAULT_SIZE / 2
+	for views in _trick_views:
+		for view in views:
+			if not is_instance_valid(view):
+				continue
+			var tween := create_tween()
+			tween.set_parallel(true)
+			tween.tween_property(view, "position", target, COLLECT_TWEEN_TIME)
+			tween.tween_property(view, "modulate:a", 0.0, COLLECT_TWEEN_TIME)
+			tween.set_parallel(false)
+			tween.tween_callback(view.queue_free)
+	_trick_views.clear()
+	for i in RoundState.PLAYER_COUNT:
+		_trick_views.append([])
+
+
+# 收分浮动提示：赢家出牌槽上方 “+N 分” 上浮淡出。
+func _float_score(winner: int, gained: int) -> void:
+	var label := Label.new()
+	label.text = "+%d 分" % gained
+	label.add_theme_font_size_override("font_size", 26)
+	label.add_theme_color_override("font_color", Color(1.0, 0.9, 0.4))
+	label.position = TRICK_SLOTS[winner] + Vector2(-50, -70)
+	label.size = Vector2(160, 36)
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.mouse_filter = MOUSE_FILTER_IGNORE
+	_fx_layer.add_child(label)
+	var tween := create_tween()
+	tween.set_parallel(true)
+	tween.tween_property(label, "position:y", label.position.y - 44.0, 1.0)
+	tween.tween_property(label, "modulate:a", 0.0, 1.0)
+	tween.set_parallel(false)
+	tween.tween_callback(label.queue_free)
+
+
+# 关键时刻强调（抠底/干锅/比赛结束）：屏幕中央大字淡入停留后淡出。
+func _announce(text: String, color := Color(1.0, 0.85, 0.3)) -> void:
+	var label := Label.new()
+	label.text = text
+	label.add_theme_font_size_override("font_size", 46)
+	label.add_theme_color_override("font_color", color)
+	label.position = Vector2(400, 330)
+	label.size = Vector2(800, 70)
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.mouse_filter = MOUSE_FILTER_IGNORE
+	label.modulate.a = 0.0
+	_fx_layer.add_child(label)
+	var tween := create_tween()
+	tween.tween_property(label, "modulate:a", 1.0, 0.15)
+	tween.tween_interval(1.4)
+	tween.tween_property(label, "modulate:a", 0.0, 0.5)
+	tween.tween_callback(label.queue_free)
+
+
+# 干锅首次判定时强调一次（规则 §6.4）。
+func _announce_dry_pot() -> void:
+	if not _dry_pot_announced and _rs.is_dry_pot():
+		_dry_pot_announced = true
+		_announce("干锅！底牌冻结，王奖励作废（§6.4）", Color(1.0, 0.6, 0.3))
+
+
+func _play_sfx(stream: AudioStream) -> void:
+	var player := AudioStreamPlayer.new()
+	player.stream = stream
+	player.finished.connect(player.queue_free)
+	add_child(player)
+	player.play()

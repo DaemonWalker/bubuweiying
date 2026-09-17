@@ -8,8 +8,12 @@ signal bid_chosen(action: Dictionary)
 
 var _current_label: Label
 var _countdown_label: Label
+var _scroll: ScrollContainer
 var _buttons_box: VBoxContainer
 var _actions: Array = []
+
+const MAX_BUTTONS_HEIGHT := 240.0  # 叫价过多时滚动，避免面板过高
+const BUTTON_ROW_HEIGHT := 34.0
 
 
 func _init() -> void:
@@ -29,9 +33,13 @@ func _init() -> void:
 	vbox.add_child(_current_label)
 	_countdown_label = Label.new()
 	vbox.add_child(_countdown_label)
+	_scroll = ScrollContainer.new()
+	_scroll.custom_minimum_size = Vector2(210, 0)
+	vbox.add_child(_scroll)
 	_buttons_box = VBoxContainer.new()
 	_buttons_box.add_theme_constant_override("separation", 4)
-	vbox.add_child(_buttons_box)
+	_buttons_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_scroll.add_child(_buttons_box)
 	visible = false
 
 
@@ -66,6 +74,7 @@ func set_bids(actions: Array, level: int) -> void:
 		button.text = bid_text(int(action.get("kind")), int(action.get("suit", -1)), level)
 		button.pressed.connect(_on_button_pressed.bind(action))
 		_buttons_box.add_child(button)
+	_scroll.custom_minimum_size.y = minf(_actions.size() * BUTTON_ROW_HEIGHT, MAX_BUTTONS_HEIGHT)
 	visible = not _actions.is_empty()
 
 
