@@ -1,37 +1,43 @@
 extends Control
-## 牌桌场景（step-05）：四家牌局可视化 + 玩家出牌交互，走通 PLAYING 阶段人机闭环。
-## 亮主/进贡/扣底 UI 属 step-06，本阶段由 HeuristicAI 对全部座位自动完成（含玩家座）。
-## 规则判断只经 RoundState.get_available_actions / apply_action，UI 层不做任何合法性判断。
+## 牌桌场景（step-05 出牌交互 + step-06 流程 UI）。
+## 亮主/反主（BidPanel，发牌中与定主倒计时内可点）、进贡/还贡（TributePanel）、
+## 扣底/扣王/捡补偿（BottomPanel）、局结算（SettlementPanel）均为对话框交互；
+## 所有可选动作来自 RoundState.get_available_actions，合法性由 apply_action 终判，UI 不做规则判断。
+## 玩家座无 AI；“下一局”按 get_result() 手工组 config（比赛串联与存档属 step-07，届时由 MatchState 替换）。
 
 const A := RoundState.ActionType
 const P := RoundState.Phase
 const PLAYER_SEAT := 0
+const AI_SEATS := [1, 2, 3]
 const SEAT_NAMES := ["南（你）", "西", "北（队友）", "东"]
+const SIDE_NAMES := ["南北方（我方）", "东西方（对方）"]
 const DEAL_INTERVAL := 0.5  # 规则 §4.1：发牌动画约 1 秒 2 张
 const AI_THINK_MIN := 0.5
 const AI_THINK_MAX := 1.0
 const AUTO_STEP_DELAY := 0.4
 const TRICK_COLLECT_DELAY := 0.9
 const PLAY_TWEEN_TIME := 0.25
+const BIDDING_SECONDS := 5.0  # 规则 §4.3：定主倒计时，每次亮/反重置
+const BID_TICK := 0.1
+const AI_BID_DELAY := 0.6
+const TRUMP_ANNOUNCE_DELAY := 1.2
 const HAND_WIDTH := 1200.0
 const SELECT_LIFT := 16.0
 const SEAT_ANCHORS := [Vector2(800, 800), Vector2(110, 450), Vector2(800, 90), Vector2(1490, 450)]
 const TRICK_SLOTS := [Vector2(800, 580), Vector2(560, 430), Vector2(800, 290), Vector2(1040, 430)]
 const DECK_POS := Vector2(800, 450)
-const BRANCH_TEXTS := {
-	1: "抓分方 0 分：庄家方赢得整场比赛！",
-	2: "抓分方 300 分：抓分方赢得整场比赛！",
-	3: "抠出底牌 3 大王：抓分方赢得整场比赛！",
-	4: "抓分方上台，底牌王追加升级",
-	5: "抓分方上台，不升级",
-	6: "庄家连任，双方不升级",
-	7: "庄家方升 1 级，底牌王追加升级",
-}
+const BID_PANEL_POS := Vector2(1250, 560)
 
 var _rs: RoundState = null
-var _ais: Array[HeuristicAI] = []
+var _ais: Dictionary = {}  # AI_SEATS 座位 -> HeuristicAI；玩家座无 AI
 var _rng := RandomNumberGenerator.new()
 var _generation := 0  # 重开一局时使未完成的 await 失效
+var _bid_time_left := 0.0
+var _ai_bid_pending := false
+var _last_bid_text := ""
+var _bottom_snapshot: Array[Card] = []  # 进入 BOTTOM 前的底牌（标记庄家扣底来源用）
+var _round_prev_levels := {}  # 绝对 side -> 本局开始时级别（结算面板显示用）
+var _tribute_total := 0
 
 var _hand_views: Array[CardView] = []
 var _selected: Array[CardView] = []
@@ -46,27 +52,41 @@ var _score_label: Label
 var _bottom_label: Label
 var _status_label: Label
 var _hint_label: Label
-var _result_label: Label
 var _play_button: Button
-var _restart_button: Button
 var _seat_labels: Array[Label] = []
 var _count_labels: Array[Label] = []
+var _bid_panel: BidPanel
+var _tribute_panel: TributePanel
+var _bottom_panel: BottomPanel
+var _settlement_panel: SettlementPanel
 
 
 func _ready() -> void:
 	_rng.randomize()
 	_build_ui()
-	_start_round()
+	_start_round({"is_first_round": true, "seed": _rng.randi()})
 
 
-func _start_round() -> void:
+func _start_round(config: Dictionary) -> void:
 	_generation += 1
-	_rs = RoundState.new({"is_first_round": true, "seed": _rng.randi()})
+	_rs = RoundState.new(config)
 	_ais.clear()
-	for seat in RoundState.PLAYER_COUNT:
+	for seat in AI_SEATS:
 		var ai := HeuristicAI.new()
 		ai.start_round(_rs, seat)
-		_ais.append(ai)
+		_ais[seat] = ai
+	_round_prev_levels.clear()
+	if config.get("is_first_round", false):
+		_round_prev_levels[0] = RoundState.FIRST_ROUND_LEVEL
+		_round_prev_levels[1] = RoundState.FIRST_ROUND_LEVEL
+		_tribute_total = 0
+	else:
+		var dealer_side := int(config.get("dealer_side", 0))
+		_round_prev_levels[dealer_side] = int(config.get("dealer_level", RoundState.FIRST_ROUND_LEVEL))
+		_round_prev_levels[1 - dealer_side] = int(config.get("catcher_level", RoundState.FIRST_ROUND_LEVEL))
+		_tribute_total = Tribute.total_count(int(config.get("tribute_score", 0)),
+			int(config.get("tribute_bonus_big", 0)), int(config.get("tribute_bonus_small", 0)),
+			bool(config.get("tribute_bonus_active", false)))
 	_player_turn = false
 	_selected.clear()
 	_clear_trick_views()
@@ -77,8 +97,12 @@ func _start_round() -> void:
 	_hand_views.clear()
 	for child in _fx_layer.get_children():
 		child.queue_free()
-	_result_label.visible = false
-	_restart_button.visible = false
+	_bid_panel.hide_panel()
+	_tribute_panel.hide_panel()
+	_bottom_panel.hide_panel()
+	_settlement_panel.hide_panel()
+	_bottom_snapshot = _rs.get_bottom()
+	_last_bid_text = ""
 	_set_status("发牌中…")
 	_refresh_all()
 	_run_dealing(_generation)
@@ -98,9 +122,6 @@ func _build_ui() -> void:
 	_bottom_label = _make_label(Vector2(20, 80), Vector2(380, 28))
 	_status_label = _make_label(Vector2(400, 648), Vector2(800, 30), HORIZONTAL_ALIGNMENT_CENTER)
 	_hint_label = _make_label(Vector2(400, 684), Vector2(800, 26), HORIZONTAL_ALIGNMENT_CENTER)
-	_result_label = _make_label(Vector2(500, 320), Vector2(600, 220), HORIZONTAL_ALIGNMENT_CENTER)
-	_result_label.add_theme_font_size_override("font_size", 22)
-	_result_label.visible = false
 	_play_button = Button.new()
 	_play_button.text = "出牌"
 	_play_button.position = Vector2(1430, 770)
@@ -108,13 +129,6 @@ func _build_ui() -> void:
 	_play_button.disabled = true
 	_play_button.pressed.connect(_on_play_pressed)
 	add_child(_play_button)
-	_restart_button = Button.new()
-	_restart_button.text = "再来一局"
-	_restart_button.position = Vector2(730, 560)
-	_restart_button.size = Vector2(140, 44)
-	_restart_button.visible = false
-	_restart_button.pressed.connect(_start_round)
-	add_child(_restart_button)
 	var label_pos := [Vector2(1150, 856), Vector2(50, 380), Vector2(725, 16), Vector2(1430, 380)]
 	for seat in RoundState.PLAYER_COUNT:
 		_seat_labels.append(_make_label(label_pos[seat], Vector2(160, 26), HORIZONTAL_ALIGNMENT_CENTER))
@@ -123,6 +137,17 @@ func _build_ui() -> void:
 		_seat_labels[seat].text = SEAT_NAMES[seat]
 	for i in RoundState.PLAYER_COUNT:
 		_trick_views.append([])
+	_bid_panel = BidPanel.new()
+	_bid_panel.position = BID_PANEL_POS
+	_bid_panel.bid_chosen.connect(_on_bid_chosen)
+	add_child(_bid_panel)
+	_tribute_panel = TributePanel.new()
+	add_child(_tribute_panel)
+	_bottom_panel = BottomPanel.new()
+	add_child(_bottom_panel)
+	_settlement_panel = SettlementPanel.new()
+	_settlement_panel.continued.connect(_on_settlement_continued)
+	add_child(_settlement_panel)
 
 
 func _make_layer() -> Control:
@@ -152,41 +177,39 @@ func _run_dealing(gen: int) -> void:
 		var seat := dealt % RoundState.PLAYER_COUNT
 		dealt += 1
 		_animate_deal(seat)
-		for s in RoundState.PLAYER_COUNT:
-			var bid := _ais[s].decide_bid(_rs, s)
+		for s in AI_SEATS:
+			var bid: Dictionary = (_ais[s] as HeuristicAI).decide_bid(_rs, s)
 			if not bid.is_empty() and _rs.apply_action(s, bid):
-				_set_status("%s 亮主！" % SEAT_NAMES[s])
+				_announce_bid(s, bid)
+		_bottom_snapshot = _rs.get_bottom()
 		if seat == PLAYER_SEAT:
 			_refresh_hand()
 		_refresh_seat_counts()
+		_refresh_bid_panel()
 		await get_tree().create_timer(DEAL_INTERVAL).timeout
 	if gen != _generation:
 		return
 	_refresh_all()
-	_auto_pre_play(gen)
+	_run_pre_play(gen)
 
 
-# 亮主/进贡/扣底本阶段无 UI，全部交给 AI 自动完成（step-06 替换为玩家交互）。
-func _auto_pre_play(gen: int) -> void:
-	while gen == _generation:
-		var phase: int = _rs.get_phase()
-		if phase == P.BIDDING:
-			_set_status("亮主/反主中…（自动）")
-			var any_bid := false
-			for seat in RoundState.PLAYER_COUNT:
-				var bid := _ais[seat].decide_bid(_rs, seat)
-				if not bid.is_empty() and _rs.apply_action(seat, bid):
-					any_bid = true
-					_set_status("%s 叫价" % SEAT_NAMES[seat])
-			if not any_bid:
-				_rs.close_bidding()
-		elif phase == P.TRIBUTE or phase == P.BOTTOM:
-			_set_status("进贡/扣底中…（自动）")
-			if not _auto_act_one():
-				_set_status("自动流程停滞（不应发生）")
-				return
-		else:
-			break
+func _run_pre_play(gen: int) -> void:
+	if _rs.get_phase() == P.BIDDING:
+		await _run_bidding_window(gen)
+		if gen != _generation:
+			return
+	_bid_panel.hide_panel()
+	if _rs.get_trump_suit() >= 0:
+		_set_status("定主：%s 主，级牌 %d；%s坐庄" % [CardView.SUIT_SYMBOLS[_rs.get_trump_suit()],
+			_rs.get_level(), SEAT_NAMES[_rs.get_dealer_seat()]])
+		_refresh_all()
+		await get_tree().create_timer(TRUMP_ANNOUNCE_DELAY).timeout
+	while gen == _generation and _rs.get_phase() == P.TRIBUTE:
+		await _tribute_step(gen)
+		_refresh_all()
+		await get_tree().create_timer(AUTO_STEP_DELAY).timeout
+	while gen == _generation and _rs.get_phase() == P.BOTTOM:
+		await _bottom_step(gen)
 		_refresh_all()
 		await get_tree().create_timer(AUTO_STEP_DELAY).timeout
 	if gen != _generation:
@@ -196,24 +219,234 @@ func _auto_pre_play(gen: int) -> void:
 		_advance_play(gen)
 
 
-# TRIBUTE / BOTTOM：找到当前有动作的座位，按动作类型路由到对应 decide_*（同 test_ai_match）。
-func _auto_act_one() -> bool:
+# 规则 §4.3：发牌后亮主/反主倒计时窗口，每次亮/反重置，超时 close_bidding()。
+func _run_bidding_window(gen: int) -> void:
+	_bid_time_left = BIDDING_SECONDS
+	_ai_bid_pending = true
+	_refresh_bid_panel()
+	while gen == _generation and _rs.get_phase() == P.BIDDING:
+		if _ai_bid_pending:
+			_ai_bid_pending = false
+			var bidder := _ai_bid_once()
+			if bidder >= 0:
+				_bid_time_left = BIDDING_SECONDS
+				_ai_bid_pending = true
+				_refresh_bid_panel()
+				await get_tree().create_timer(AI_BID_DELAY).timeout
+				continue
+		await get_tree().create_timer(BID_TICK).timeout
+		if gen != _generation or _rs.get_phase() != P.BIDDING:
+			break
+		_bid_time_left -= BID_TICK
+		_bid_panel.set_countdown_text("定主倒计时 %.1f 秒（亮/反重置）" % maxf(_bid_time_left, 0.0))
+		if _bid_time_left <= 0.0:
+			_rs.close_bidding()
+
+
+func _ai_bid_once() -> int:
+	for seat in AI_SEATS:
+		var bid: Dictionary = (_ais[seat] as HeuristicAI).decide_bid(_rs, seat)
+		if not bid.is_empty() and _rs.apply_action(seat, bid):
+			_announce_bid(seat, bid)
+			return seat
+	return -1
+
+
+func _announce_bid(seat: int, bid: Dictionary) -> void:
+	_last_bid_text = "%s %s" % [SEAT_NAMES[seat],
+		BidPanel.bid_text(int(bid.get("kind")), int(bid.get("suit", -1)), _rs.get_level())]
+	_set_status(_last_bid_text)
+
+
+# TRIBUTE：找到当前有动作的座位；玩家座弹对话框，AI 座自动并展示结果。
+func _tribute_step(gen: int) -> void:
 	for seat in RoundState.PLAYER_COUNT:
 		var actions := _rs.get_available_actions(seat)
 		if actions.is_empty():
 			continue
-		var action: Dictionary
-		match int(actions[0].get("type")):
-			A.TRIBUTE:
-				action = _ais[seat].decide_tribute_give(_rs, seat)
-			A.RETURN:
-				action = _ais[seat].decide_tribute_return(_rs, seat)
-			A.DISCARD_BOTTOM:
-				action = _ais[seat].decide_bottom(_rs, seat)
-			_:
-				action = _ais[seat].decide_bottom_joker(_rs, seat)
-		return _rs.apply_action(seat, action)
+		var action_type := int(actions[0].get("type"))
+		if seat == PLAYER_SEAT:
+			if action_type == A.TRIBUTE:
+				await _player_tribute(actions[0], gen)
+			else:
+				await _player_return(actions[0], gen)
+		else:
+			_ai_tribute_act(seat, action_type)
+		return
+	if gen == _generation:
+		_set_status("进贡流程停滞（不应发生）")
+
+
+func _player_tribute(desc: Dictionary, gen: int) -> void:
+	var applied := false
+	while not applied and gen == _generation and _rs.get_phase() == P.TRIBUTE:
+		_tribute_panel.open_give(_rs.get_hand(PLAYER_SEAT), int(desc.get("min_count")),
+			int(desc.get("max_count")), _tribute_total, _rs.get_level(), _rs.get_trump_suit())
+		var cards: Array = await _tribute_panel.tribute_chosen
+		_tribute_panel.hide_panel()
+		if gen != _generation:
+			return
+		applied = _rs.apply_action(PLAYER_SEAT, {"type": A.TRIBUTE, "cards": cards})
+		if applied:
+			_set_status("你进贡 %d 张" % cards.size())
+		else:
+			_set_status("进贡被拒：须为手中最大的非分牌（§5）")
+
+
+func _player_return(desc: Dictionary, gen: int) -> void:
+	var to_seat := int(desc.get("to_seat"))
+	var count := int(desc.get("count"))
+	var applied := false
+	while not applied and gen == _generation and _rs.get_phase() == P.TRIBUTE:
+		_tribute_panel.open_return(_rs.get_hand(PLAYER_SEAT), SEAT_NAMES[to_seat], to_seat,
+			count, _rs.get_level(), _rs.get_trump_suit())
+		var res: Array = await _tribute_panel.return_chosen
+		_tribute_panel.hide_panel()
+		if gen != _generation:
+			return
+		applied = _rs.apply_action(PLAYER_SEAT,
+			{"type": A.RETURN, "to_seat": int(res[0]), "cards": res[1]})
+		if applied:
+			_set_status("你还贡给 %s %d 张" % [SEAT_NAMES[to_seat], count])
+		else:
+			_set_status("还贡被拒：须为非分牌副牌（§5）")
+
+
+func _ai_tribute_act(seat: int, action_type: int) -> void:
+	var ai := _ais[seat] as HeuristicAI
+	var action: Dictionary
+	if action_type == A.TRIBUTE:
+		action = ai.decide_tribute_give(_rs, seat)
+	else:
+		action = ai.decide_tribute_return(_rs, seat)
+	if not _rs.apply_action(seat, action):
+		_set_status("AI 进贡/还贡被拒（不应发生）")
+		return
+	if action_type == A.TRIBUTE:
+		_set_status("%s 进贡 %d 张" % [SEAT_NAMES[seat], (action.get("cards") as Array).size()])
+	else:
+		_set_status("%s 还贡给 %s %d 张" % [SEAT_NAMES[seat],
+			SEAT_NAMES[int(action.get("to_seat"))], (action.get("cards") as Array).size()])
+
+
+# BOTTOM：扣底/扣王/捡补偿；玩家座弹对话框，AI 座自动并展示结果。
+func _bottom_step(gen: int) -> void:
+	for seat in RoundState.PLAYER_COUNT:
+		var actions := _rs.get_available_actions(seat)
+		if actions.is_empty():
+			continue
+		var action_type := int(actions[0].get("type"))
+		if seat == PLAYER_SEAT:
+			match action_type:
+				A.DISCARD_BOTTOM:
+					await _player_discard_bottom(gen)
+				A.PICK_COMPENSATION:
+					await _player_compensation(int(actions[0].get("count")), gen)
+				_:
+					# DISCARD_JOKERS 或仅 PASS（无王可扣时直接跳过，无需弹窗）
+					if _has_action(actions, A.DISCARD_JOKERS):
+						await _player_bottom_jokers(gen)
+					elif _rs.apply_action(PLAYER_SEAT, {"type": A.PASS}):
+						_set_status("你无王可扣，跳过")
+		else:
+			_ai_bottom_act(seat, action_type)
+		return
+	if gen == _generation:
+		_set_status("扣底流程停滞（不应发生）")
+
+
+func _has_action(actions: Array, action_type: int) -> bool:
+	for action in actions:
+		if int(action.get("type")) == action_type:
+			return true
 	return false
+
+
+func _player_discard_bottom(gen: int) -> void:
+	var applied := false
+	while not applied and gen == _generation and _rs.get_phase() == P.BOTTOM:
+		_bottom_panel.open_discard(_rs.get_hand(PLAYER_SEAT), _bottom_snapshot,
+			_rs.get_level(), _rs.get_trump_suit())
+		var cards: Array = await _bottom_panel.discard_chosen
+		_bottom_panel.hide_panel()
+		if gen != _generation:
+			return
+		applied = _rs.apply_action(PLAYER_SEAT, {"type": A.DISCARD_BOTTOM, "cards": cards})
+		if applied:
+			var msg := "你扣底 6 张"
+			if _rs.is_bottom_public():
+				msg += "，扣了王，底牌公开（§6.1）"
+			if _rs.is_dry_pot():
+				msg += "；干锅！底牌冻结，王奖励作废（§6.4）"
+			_set_status(msg)
+		else:
+			_set_status("扣底被拒：须扣 6 张，且有大王须先扣大王（§6.2）")
+
+
+func _player_bottom_jokers(gen: int) -> void:
+	var decided := false
+	while not decided and gen == _generation and _rs.get_phase() == P.BOTTOM:
+		_bottom_panel.open_jokers(_rs.get_hand(PLAYER_SEAT), _rs.get_level(), _rs.get_trump_suit())
+		var cards: Array = await _bottom_panel.jokers_decided
+		_bottom_panel.hide_panel()
+		if gen != _generation:
+			return
+		if cards.is_empty():
+			decided = _rs.apply_action(PLAYER_SEAT, {"type": A.PASS})
+			if decided:
+				_set_status("你不扣王")
+		else:
+			decided = _rs.apply_action(PLAYER_SEAT, {"type": A.DISCARD_JOKERS, "cards": cards})
+			if decided:
+				_set_status("你扣王 %d 张，底牌公开（§6.3）" % cards.size())
+			else:
+				_set_status("扣王被拒：只能扣王，且有大王须先扣大王（§6.2）")
+
+
+func _player_compensation(count: int, gen: int) -> void:
+	var applied := false
+	while not applied and gen == _generation and _rs.get_phase() == P.BOTTOM:
+		_bottom_panel.open_compensation(_rs.get_bottom(), count, _rs.get_level(), _rs.get_trump_suit())
+		var cards: Array = await _bottom_panel.compensation_chosen
+		_bottom_panel.hide_panel()
+		if gen != _generation:
+			return
+		applied = _rs.apply_action(PLAYER_SEAT, {"type": A.PICK_COMPENSATION, "cards": cards})
+		if applied:
+			var msg := "你捡补偿 %d 张" % count
+			if _rs.is_dry_pot():
+				msg += "；干锅！底牌冻结，王奖励作废（§6.4）"
+			_set_status(msg)
+		else:
+			_set_status("捡牌被拒：须为底牌中最小的非分牌（§6.3）")
+
+
+func _ai_bottom_act(seat: int, action_type: int) -> void:
+	var ai := _ais[seat] as HeuristicAI
+	var action: Dictionary
+	if action_type == A.DISCARD_BOTTOM:
+		action = ai.decide_bottom(_rs, seat)
+	else:
+		action = ai.decide_bottom_joker(_rs, seat)
+	if not _rs.apply_action(seat, action):
+		_set_status("AI 扣底/扣王被拒（不应发生）")
+		return
+	var msg := ""
+	match action_type:
+		A.DISCARD_BOTTOM:
+			msg = "%s 扣底完成" % SEAT_NAMES[seat]
+			if _rs.is_bottom_public():
+				msg += "，扣了王，底牌公开"
+		A.PICK_COMPENSATION:
+			msg = "%s 捡补偿 %d 张" % [SEAT_NAMES[seat], (action.get("cards") as Array).size()]
+		_:
+			if int(action.get("type")) == A.DISCARD_JOKERS:
+				msg = "%s 扣王 %d 张，底牌公开" % [SEAT_NAMES[seat], (action.get("cards") as Array).size()]
+			else:
+				msg = "%s 不扣王" % SEAT_NAMES[seat]
+	if _rs.is_dry_pot():
+		msg += "；干锅！底牌冻结，王奖励作废（§6.4）"
+	_set_status(msg)
 
 
 func _advance_play(gen: int) -> void:
@@ -236,7 +469,7 @@ func _advance_play(gen: int) -> void:
 	if gen != _generation:
 		return
 	var scores_before := [_rs.get_side_score(0), _rs.get_side_score(1)]
-	var action := _ais[seat].decide_play(_rs, seat)
+	var action: Dictionary = (_ais[seat] as HeuristicAI).decide_play(_rs, seat)
 	var cards: Array[Card] = []
 	cards.assign(action.get("cards", []))
 	if not _rs.apply_action(seat, action):
@@ -269,19 +502,56 @@ func _after_play(seat: int, cards: Array[Card], gen: int, scores_before: Array) 
 func _show_settlement() -> void:
 	_player_turn = false
 	_update_play_button()
+	_bid_panel.hide_panel()
+	_settlement_panel.show_result(_rs.get_result(), _round_prev_levels, SIDE_NAMES)
+
+
+# “下一局”按本局结果组 config（比赛串联/存档属 step-07，届时由 MatchState 替换）。
+func _on_settlement_continued() -> void:
 	var r := _rs.get_result()
-	var lines := PackedStringArray()
-	lines.append("—— 一局结束 ——")
-	lines.append("抓分方总分 S = %d（%s）" % [r.get("catcher_score", 0),
-		"抠底，底牌分翻倍" if r.get("kongdi", false) else "保底"])
-	lines.append(BRANCH_TEXTS.get(r.get("branch", 0), ""))
-	lines.append("庄家方级别 %d　抓分方级别 %d" % [r.get("dealer_level", 0), r.get("catcher_level", 0)])
-	_result_label.text = "\n".join(lines)
-	_result_label.visible = true
-	_restart_button.visible = true
+	if r.is_empty():
+		return
+	var config: Dictionary
+	if bool(r.get("match_over", false)):
+		config = {"is_first_round": true, "seed": _rng.randi()}
+	else:
+		var dealer_side := int(r["dealer_side"])
+		var post := {dealer_side: int(r["dealer_level"]), 1 - dealer_side: int(r["catcher_level"])}
+		var next_dealer := int(r["next_dealer_side"])
+		var nt: Dictionary = r["next_tribute"]
+		config = {
+			"is_first_round": false,
+			"dealer_side": next_dealer,
+			"dealer_level": post[next_dealer],
+			"catcher_level": post[1 - next_dealer],
+			"tribute_score": int(nt["score"]),
+			"tribute_bonus_big": int(nt["bonus_big"]),
+			"tribute_bonus_small": int(nt["bonus_small"]),
+			"tribute_bonus_active": bool(nt["bonus_active"]),
+			"seed": _rng.randi(),
+		}
+	_start_round(config)
 
 
 # --- 玩家交互 ---
+
+func _on_bid_chosen(action: Dictionary) -> void:
+	if _rs == null:
+		return
+	var phase := _rs.get_phase()
+	if phase != P.DEALING and phase != P.BIDDING:
+		return
+	if not _rs.apply_action(PLAYER_SEAT, action):
+		_set_status("该叫价已无效")
+		_refresh_bid_panel()
+		return
+	_last_bid_text = "你 %s" % BidPanel.bid_text(int(action.get("kind")),
+		int(action.get("suit", -1)), _rs.get_level())
+	_set_status(_last_bid_text)
+	_bid_time_left = BIDDING_SECONDS  # 规则 §4.3：每次亮/反重置倒计时
+	_ai_bid_pending = true
+	_refresh_bid_panel()
+
 
 func _on_card_clicked(view: CardView) -> void:
 	if not _player_turn or _rs.get_phase() != P.PLAYING:
@@ -336,8 +606,8 @@ func _allowed_play_counts() -> Array[int]:
 
 
 func _broadcast_observe(seat: int, cards: Array[Card]) -> void:
-	for ai in _ais:
-		ai.observe_play(seat, cards)
+	for ai in _ais.values():
+		(ai as HeuristicAI).observe_play(seat, cards)
 
 
 # --- 视图刷新与动画 ---
@@ -347,6 +617,26 @@ func _refresh_all() -> void:
 	_refresh_seat_counts()
 	_refresh_scores()
 	_refresh_bottom()
+
+
+func _refresh_bid_panel() -> void:
+	if _rs == null:
+		return
+	var phase := _rs.get_phase()
+	if phase != P.DEALING and phase != P.BIDDING:
+		_bid_panel.hide_panel()
+		return
+	var bids: Array = []
+	for action in _rs.get_available_actions(PLAYER_SEAT):
+		if int(action.get("type")) == A.BID:
+			bids.append(action)
+	_bid_panel.set_bids(bids, _rs.get_level())
+	if _last_bid_text.is_empty():
+		_bid_panel.set_current_text("当前最高：无")
+	else:
+		_bid_panel.set_current_text("当前最高：%s" % _last_bid_text)
+	if phase == P.DEALING:
+		_bid_panel.set_countdown_text("发牌中：可随时抢亮/反")
 
 
 func _refresh_hand() -> void:
