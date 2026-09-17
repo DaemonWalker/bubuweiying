@@ -14,6 +14,7 @@ func _init() -> void:
 		"res://tests/test_bottom.gd",
 		"res://tests/test_settlement.gd",
 		"res://tests/test_round_state.gd",
+		"res://tests/test_match_state.gd",
 	]
 	for path in suite_paths:
 		var suite = (load(path) as GDScript).new()
