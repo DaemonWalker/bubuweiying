@@ -89,6 +89,9 @@ func _full_round_with_tribute(c: TestCheck) -> void:
 	var catcher: int = 1 - r.dealer_side
 	var expected_s: int = in_play[catcher] + (2 * r.bottom_score if r.kongdi else 0)
 	c.check_eq(r.catcher_score, expected_s, "§8 S = 抓分方总分（含抠底翻倍）")
+	var last_winner := rs.get_last_trick_winner()
+	c.check_true(last_winner in [0, 1, 2, 3], "末轮赢家座位有效")
+	c.check_eq(RoundState.side_of(last_winner) == catcher, r.kongdi, "§8 抠底 = 末轮抓分方赢")
 	c.check_true(r.next_dealer_side in [0, 1], "结果含下局庄家方")
 	c.check_true(r.has("next_tribute") and r.next_tribute.has("score"), "结果含下局进贡参数")
 

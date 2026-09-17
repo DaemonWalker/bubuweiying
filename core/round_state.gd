@@ -226,6 +226,11 @@ func get_current_seat() -> int:
 	return _current_seat
 
 
+## 上一轮的赢家座位（尚无已结束的轮时为 -1）；UI 显示收分用，规则判定见 §7.3。
+func get_last_trick_winner() -> int:
+	return _last_trick_winner
+
+
 ## 当前最高叫价；无人叫价为 null。
 func get_current_bid() -> Bidding.Bid:
 	return _current_bid
