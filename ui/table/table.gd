@@ -1,9 +1,10 @@
 extends Control
-## 牌桌场景（step-05 出牌交互 + step-06 流程 UI）。
+## 牌桌场景（step-05 出牌交互 + step-06 流程 UI + step-07 比赛串联）。
 ## 亮主/反主（BidPanel，发牌中与定主倒计时内可点）、进贡/还贡（TributePanel）、
 ## 扣底/扣王/捡补偿（BottomPanel）、局结算（SettlementPanel）均为对话框交互；
 ## 所有可选动作来自 RoundState.get_available_actions，合法性由 apply_action 终判，UI 不做规则判断。
-## 玩家座无 AI；“下一局”按 get_result() 手工组 config（比赛串联与存档属 step-07，届时由 MatchState 替换）。
+## 玩家座无 AI；比赛串联经 Game autoload（MatchState）：结算后 finish_round 推进并自动存档，
+## 下一局 config 来自 Game.next_round_config()；右上“退出比赛”放弃当前局回主菜单。
 
 const A := RoundState.ActionType
 const P := RoundState.Phase
@@ -38,6 +39,8 @@ var _last_bid_text := ""
 var _bottom_snapshot: Array[Card] = []  # 进入 BOTTOM 前的底牌（标记庄家扣底来源用）
 var _round_prev_levels := {}  # 绝对 side -> 本局开始时级别（结算面板显示用）
 var _tribute_total := 0
+var _match_progress_applied := false  # 本局结果是否已提交 MatchState（防重复 finish_round）
+var _exit_armed := false  # “退出比赛”二次确认
 
 var _hand_views: Array[CardView] = []
 var _selected: Array[CardView] = []
@@ -53,6 +56,7 @@ var _bottom_label: Label
 var _status_label: Label
 var _hint_label: Label
 var _play_button: Button
+var _exit_button: Button
 var _seat_labels: Array[Label] = []
 var _count_labels: Array[Label] = []
 var _bid_panel: BidPanel
@@ -64,11 +68,18 @@ var _settlement_panel: SettlementPanel
 func _ready() -> void:
 	_rng.randomize()
 	_build_ui()
-	_start_round({"is_first_round": true, "seed": _rng.randi()})
+	var config := Game.next_round_config()
+	if config.is_empty():
+		Game.new_match()  # 比赛已结束（不应发生），开新比赛兜底
+		return
+	_start_round(config)
 
 
 func _start_round(config: Dictionary) -> void:
 	_generation += 1
+	_match_progress_applied = false
+	_exit_armed = false
+	_exit_button.text = "退出比赛"
 	_rs = RoundState.new(config)
 	_ais.clear()
 	for seat in AI_SEATS:
@@ -129,6 +140,12 @@ func _build_ui() -> void:
 	_play_button.disabled = true
 	_play_button.pressed.connect(_on_play_pressed)
 	add_child(_play_button)
+	_exit_button = Button.new()
+	_exit_button.text = "退出比赛"
+	_exit_button.position = Vector2(1470, 16)
+	_exit_button.size = Vector2(110, 36)
+	_exit_button.pressed.connect(_on_exit_pressed)
+	add_child(_exit_button)
 	var label_pos := [Vector2(1150, 856), Vector2(50, 380), Vector2(725, 16), Vector2(1430, 380)]
 	for seat in RoundState.PLAYER_COUNT:
 		_seat_labels.append(_make_label(label_pos[seat], Vector2(160, 26), HORIZONTAL_ALIGNMENT_CENTER))
@@ -147,6 +164,7 @@ func _build_ui() -> void:
 	add_child(_bottom_panel)
 	_settlement_panel = SettlementPanel.new()
 	_settlement_panel.continued.connect(_on_settlement_continued)
+	_settlement_panel.menu_requested.connect(_on_settlement_menu)
 	add_child(_settlement_panel)
 
 
@@ -506,31 +524,48 @@ func _show_settlement() -> void:
 	_settlement_panel.show_result(_rs.get_result(), _round_prev_levels, SIDE_NAMES)
 
 
-# “下一局”按本局结果组 config（比赛串联/存档属 step-07，届时由 MatchState 替换）。
+# 结算面板“下一局”（比赛未结束）：推进 MatchState 并自动存档，再开下一局；
+# “新比赛”（比赛结束）：经 Game 重开整场比赛（覆盖存档，牌桌场景重进）。
 func _on_settlement_continued() -> void:
+	if _rs == null or _rs.get_phase() != P.SETTLEMENT:
+		return
 	var r := _rs.get_result()
 	if r.is_empty():
 		return
-	var config: Dictionary
 	if bool(r.get("match_over", false)):
-		config = {"is_first_round": true, "seed": _rng.randi()}
-	else:
-		var dealer_side := int(r["dealer_side"])
-		var post := {dealer_side: int(r["dealer_level"]), 1 - dealer_side: int(r["catcher_level"])}
-		var next_dealer := int(r["next_dealer_side"])
-		var nt: Dictionary = r["next_tribute"]
-		config = {
-			"is_first_round": false,
-			"dealer_side": next_dealer,
-			"dealer_level": post[next_dealer],
-			"catcher_level": post[1 - next_dealer],
-			"tribute_score": int(nt["score"]),
-			"tribute_bonus_big": int(nt["bonus_big"]),
-			"tribute_bonus_small": int(nt["bonus_small"]),
-			"tribute_bonus_active": bool(nt["bonus_active"]),
-			"seed": _rng.randi(),
-		}
-	_start_round(config)
+		Game.new_match()
+		return
+	_apply_match_progress(r)
+	_start_round(Game.next_round_config())
+
+
+# 结算面板“回主菜单”（比赛结束）：先落档（比赛结束会清除存档），再回主菜单。
+func _on_settlement_menu() -> void:
+	if _rs != null and _rs.get_phase() == P.SETTLEMENT:
+		var r := _rs.get_result()
+		if not r.is_empty():
+			_apply_match_progress(r)
+	Game.quit_to_menu()
+
+
+func _apply_match_progress(result: Dictionary) -> void:
+	if _match_progress_applied:
+		return
+	_match_progress_applied = true
+	Game.finish_round(result)
+
+
+# “退出比赛”二次确认：3 秒内再点一次才退出（放弃当前局，从最近局结算点恢复）。
+func _on_exit_pressed() -> void:
+	if not _exit_armed:
+		_exit_armed = true
+		_exit_button.text = "确认退出？"
+		await get_tree().create_timer(3.0).timeout
+		_exit_armed = false
+		if is_instance_valid(_exit_button):
+			_exit_button.text = "退出比赛"
+		return
+	Game.quit_to_menu()
 
 
 # --- 玩家交互 ---

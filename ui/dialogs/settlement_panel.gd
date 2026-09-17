@@ -1,9 +1,11 @@
 class_name SettlementPanel
 extends ModalPanel
 ## 一局结算面板（规则 §8、§9）：抓分方得分、抠底/保底、升级结果、底牌王追加、
-## 下局进贡预告（§5）；比赛结束展示胜者。按钮发出 continued()，开局由 table 决定。
+## 下局进贡预告（§5）；比赛结束展示胜者。按钮发出 continued()（下一局/新比赛）
+## 或 menu_requested()（比赛结束时回主菜单），开局与场景切换由 table/Game 决定。
 
 signal continued()
+signal menu_requested()
 
 const BRANCH_TEXTS := {
 	1: "抓分方 0 分：庄家方赢得整场比赛！",
@@ -65,6 +67,10 @@ func show_result(result: Dictionary, prev_levels: Dictionary, side_names: Array)
 		var win_label := _add_info("【%s 赢得整场比赛】" % side_names[winner_side])
 		win_label.add_theme_font_size_override("font_size", 24)
 		button.text = "新比赛"
+		var menu_button := Button.new()
+		menu_button.text = "回主菜单"
+		menu_button.pressed.connect(func() -> void: menu_requested.emit())
+		_content.add_child(menu_button)
 	else:
 		# 规则 §5：下局进贡方恒为下局抓分方，张数含生效的底牌王加成
 		var count := Tribute.total_count(int(nt.get("score", 0)), big, small,
