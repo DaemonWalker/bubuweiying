@@ -76,11 +76,13 @@ func show_result(result: Dictionary, prev_levels: Dictionary, side_names: Array)
 		menu_button.pressed.connect(func() -> void: menu_requested.emit())
 		_content.add_child(menu_button)
 	else:
-		# 规则 §5：下局进贡方恒为下局抓分方，张数含生效的底牌王加成
+		# 规则 §5：下局进贡方恒为下局抓分方（上局败方），张数含生效的底牌王加成
 		var count := Tribute.total_count(int(nt.get("score", 0)), big, small,
 			bool(nt.get("bonus_active", false)))
 		var payer := 1 - int(result.get("next_dealer_side", 0))
-		_add_info("下局预告：%s 进贡 %d 张（§5）" % [side_names[payer], count])
+		var note := "，攻守易位" if Tribute.is_reversed(int(nt.get("score", 0))) else ""
+		_add_info("下局预告：%s 进贡 %d 张（上局 S=%d%s，§5）" % [
+			side_names[payer], count, int(nt.get("score", 0)), note])
 		button.text = "下一局"
 	button.pressed.connect(func() -> void: continued.emit())
 	_content.add_child(button)

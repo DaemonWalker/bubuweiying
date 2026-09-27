@@ -24,7 +24,7 @@ res://
 │   ├── main_menu/         # 主菜单：新比赛 / 继续比赛
 │   ├── table/             # 牌桌场景：四家手牌、出牌区、底牌区、分数显示、动画
 │   ├── dialogs/           # 亮主/反主、进贡/还贡、扣底扣王、结算面板
-│   └── card_view.gd       # 单张牌的可视化（代码绘制花色+数字，无美术素材）
+│   └── card_view.gd       # 单张牌的可视化（Vector Playing Cards 牌面，主牌金框/选中蓝框）
 ├── autoload/
 │   ├── game.gd            # 场景切换与比赛总控
 │   └── save_system.gd     # 存档读写
@@ -53,7 +53,7 @@ DEALING → BIDDING → TRIBUTE → BOTTOM → PLAYING → SETTLEMENT → 交回
 ## AI
 
 - `AIPlayer` 接口：`decide_bid / decide_tribute / decide_bottom_jokers / decide_play` 等，与状态机的 action 一一对应。
-- 启发式 AI：记已出牌、算剩余分牌、跟牌时按"能赢则最小代价赢、赢不了垫小牌"决策；亮主/扣底按手牌强度阈值决策。
+- 启发式 AI：逐张记牌 + 每座位缺门跟踪（跟牌垫出即绝门）；扣底优先整门扣净一门造缺门、主牌不强不扣分牌；领出先判吊主（主牌占剩余一半以上且对手未全绝主则倒着出主抽主，优先主牌滚子/棒子双调），再领"无人能压"的滚子/棒子（缺门折算安全性）与安全大牌单张（抓分方优先分牌跑分、该门 ≥2 张才出），最后小牌试探（优先对手未绝门）；跟牌"有分杀没分跑"——桌面无分且非尾盘时不主杀副、不拆棒、不动"头"，能赢时优先不拆自家棒/滚子的最小代价赢法，赢不了垫最小非分孤张；尾盘（手牌 ≤6）直接出最大牌型抢出牌权；亮主/扣王按手牌强度阈值决策（打 10 阈值 +1）。
 - 接口保持稳定，后续可替换更强的实现（残局推算等）而不动 core 与 UI。
 
 ## 存档
@@ -76,5 +76,5 @@ DEALING → BIDDING → TRIBUTE → BOTTOM → PLAYING → SETTLEMENT → 交回
 
 ## 界面与素材
 
-- 牌面用代码绘制（圆角矩形 + 花色符号 + 数字），不依赖外部美术素材。
+- 牌面使用 Vector Playing Cards 矢量贴图（`assets/cards/`，Byron Knoll，公有领域；大王=红 Joker、小王=黑 Joker，牌背/空牌为自制 SVG），叠加主牌金框徽章/选中蓝框/悬停提亮。
 - 分辨率自适应：`window/stretch/mode="canvas_items"`（已在 project.godot 配置）。

@@ -12,7 +12,7 @@ const PLAYER_SEAT := 0
 const AI_SEATS := [1, 2, 3]
 const SEAT_NAMES := ["南（你）", "西", "北（队友）", "东"]
 const SIDE_NAMES := ["南北方（我方）", "东西方（对方）"]
-const DEAL_INTERVAL := 0.5  # 规则 §4.1：发牌动画约 1 秒 2 张（可点“跳过发牌”快进）
+const DEAL_INTERVAL := 0.125  # 规则 §4.1：每座约 1 秒 2 张，四人合计每秒约 8 张（可点“跳过发牌”快进）
 const AI_THINK_MIN := 0.4
 const AI_THINK_MAX := 1.3
 const AUTO_STEP_DELAY := 0.4
@@ -24,6 +24,8 @@ const BID_TICK := 0.1
 const AI_BID_MIN := 0.8  # AI 亮/反的拟人化犹豫区间
 const AI_BID_MAX := 2.0
 const TRUMP_ANNOUNCE_DELAY := 1.2
+const TRIBUTE_ANNOUNCE_DELAY := 1.6  # 进贡方向公告停留时间
+const TRIBUTE_STEP_DELAY := 1.0  # 进贡/还贡每步间隔（比 AUTO_STEP_DELAY 慢，便于看清谁贡了几张）
 const HAND_WIDTH := 1200.0
 const SELECT_LIFT := 16.0
 const SEAT_ANCHORS := [Vector2(800, 800), Vector2(110, 450), Vector2(800, 90), Vector2(1490, 450)]
@@ -41,6 +43,7 @@ var _last_bid_text := ""
 var _bottom_snapshot: Array[Card] = []  # 进入 BOTTOM 前的底牌（标记庄家扣底来源用）
 var _round_prev_levels := {}  # 绝对 side -> 本局开始时级别（结算面板显示用）
 var _tribute_total := 0
+var _tribute_score := 0  # 上局抓分方总分 S（进贡原因展示用）
 var _match_progress_applied := false  # 本局结果是否已提交 MatchState（防重复 finish_round）
 var _exit_armed := false  # “退出比赛”二次确认
 var _deal_fast := false  # “跳过发牌”：快进剩余发牌（无动画、无间隔）
@@ -56,6 +59,7 @@ var _hand_area: Control
 var _center_layer: Control
 var _fx_layer: Control
 var _score_label: Label
+var _trump_label: Label
 var _bottom_label: Label
 var _status_label: Label
 var _hint_label: Label
@@ -99,11 +103,13 @@ func _start_round(config: Dictionary) -> void:
 		_round_prev_levels[0] = RoundState.FIRST_ROUND_LEVEL
 		_round_prev_levels[1] = RoundState.FIRST_ROUND_LEVEL
 		_tribute_total = 0
+		_tribute_score = 0
 	else:
 		var dealer_side := int(config.get("dealer_side", 0))
 		_round_prev_levels[dealer_side] = int(config.get("dealer_level", RoundState.FIRST_ROUND_LEVEL))
 		_round_prev_levels[1 - dealer_side] = int(config.get("catcher_level", RoundState.FIRST_ROUND_LEVEL))
-		_tribute_total = Tribute.total_count(int(config.get("tribute_score", 0)),
+		_tribute_score = int(config.get("tribute_score", 0))
+		_tribute_total = Tribute.total_count(_tribute_score,
 			int(config.get("tribute_bonus_big", 0)), int(config.get("tribute_bonus_small", 0)),
 			bool(config.get("tribute_bonus_active", false)))
 	_player_turn = false
@@ -138,6 +144,8 @@ func _build_ui() -> void:
 	add_child(_hand_area)
 	_fx_layer = _make_layer()
 	_score_label = _make_label(Vector2(20, 16), Vector2(380, 60))
+	_trump_label = _make_label(Vector2(1210, 12), Vector2(240, 44), HORIZONTAL_ALIGNMENT_CENTER)
+	_trump_label.add_theme_font_size_override("font_size", 30)
 	_bottom_label = _make_label(Vector2(20, 80), Vector2(380, 28))
 	_status_label = _make_label(Vector2(400, 648), Vector2(800, 30), HORIZONTAL_ALIGNMENT_CENTER)
 	_hint_label = _make_label(Vector2(400, 684), Vector2(800, 26), HORIZONTAL_ALIGNMENT_CENTER)
@@ -241,10 +249,17 @@ func _run_pre_play(gen: int) -> void:
 			_rs.get_level(), SEAT_NAMES[_rs.get_dealer_seat()]])
 		_refresh_all()
 		await get_tree().create_timer(TRUMP_ANNOUNCE_DELAY).timeout
+	if gen == _generation and _rs.get_phase() == P.TRIBUTE:
+		# 规则 §5：进贡方向公告（上局败方 → 本局庄家），含攻守易位说明
+		var note := "，攻守易位" if Tribute.is_reversed(_tribute_score) else ""
+		_set_status("进贡：%s 向庄家 %s 合计进贡 %d 张（上局 S=%d%s，§5）" % [
+			SIDE_NAMES[1 - _rs.get_dealer_side()], SEAT_NAMES[_rs.get_dealer_seat()],
+			_tribute_total, _tribute_score, note])
+		await get_tree().create_timer(TRIBUTE_ANNOUNCE_DELAY).timeout
 	while gen == _generation and _rs.get_phase() == P.TRIBUTE:
 		await _tribute_step(gen)
 		_refresh_all()
-		await get_tree().create_timer(AUTO_STEP_DELAY).timeout
+		await get_tree().create_timer(TRIBUTE_STEP_DELAY).timeout
 	while gen == _generation and _rs.get_phase() == P.BOTTOM:
 		await _bottom_step(gen)
 		_refresh_all()
@@ -322,7 +337,8 @@ func _player_tribute(desc: Dictionary, gen: int) -> void:
 	var applied := false
 	while not applied and gen == _generation and _rs.get_phase() == P.TRIBUTE:
 		_tribute_panel.open_give(_rs.get_hand(PLAYER_SEAT), int(desc.get("min_count")),
-			int(desc.get("max_count")), _tribute_total, _rs.get_level(), _rs.get_trump_suit())
+			int(desc.get("max_count")), _tribute_total, _rs.get_level(), _rs.get_trump_suit(),
+			_tribute_score)
 		var cards: Array = await _tribute_panel.tribute_chosen
 		_tribute_panel.hide_panel()
 		if gen != _generation:
@@ -776,6 +792,13 @@ func _refresh_scores() -> void:
 	var suit: int = _rs.get_trump_suit()
 	if suit >= 0 and suit < CardView.SUIT_SYMBOLS.size():
 		trump = CardView.SUIT_SYMBOLS[suit]
+		_trump_label.text = "主牌：%s %d" % [trump, _rs.get_level()]
+		var red_suit := suit == Card.Suit.HEART or suit == Card.Suit.DIAMOND
+		_trump_label.add_theme_color_override("font_color",
+			Color(1.0, 0.4, 0.35) if red_suit else Color(0.92, 0.92, 0.96))
+	else:
+		_trump_label.text = "主牌：未定"
+		_trump_label.add_theme_color_override("font_color", Color(0.75, 0.75, 0.7))
 	_score_label.text = "级别 %d　主花色 %s\n我方（南北）%d 分　对方（东西）%d 分" % [
 		_rs.get_level(), trump, _rs.get_side_score(0), _rs.get_side_score(1)]
 
@@ -814,7 +837,7 @@ func _animate_deal(seat: int) -> void:
 	_fx_layer.add_child(view)
 	var tween := create_tween()
 	tween.tween_property(view, "position",
-		SEAT_ANCHORS[seat] - CardView.DEFAULT_SIZE / 2, DEAL_INTERVAL * 0.6)
+		SEAT_ANCHORS[seat] - CardView.DEFAULT_SIZE / 2, minf(DEAL_INTERVAL * 0.6, 0.1))
 	tween.tween_callback(view.queue_free)
 
 

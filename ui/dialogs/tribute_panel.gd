@@ -40,15 +40,16 @@ func get_mode() -> int:
 	return _mode
 
 
-## 进贡模式：min_count/max_count 来自 TRIBUTE 描述符，total 为本局合计贡牌张数。
+## 进贡模式：min_count/max_count 来自 TRIBUTE 描述符，total 为本局合计贡牌张数，score 为上局抓分方总分 S。
 func open_give(hand: Array[Card], min_count: int, max_count: int, total: int,
-		level: int, trump: int) -> void:
+		level: int, trump: int, score: int) -> void:
 	_reset("进贡")
 	_mode = Mode.GIVE
 	_hand = hand
 	_level = level
 	_trump = trump
-	_add_info("抓分方本局须合计进贡 %d 张，由你与队友分摊（§5）。\n贡牌必须是手中最大的非分牌，请选择你贡几张：" % total)
+	var note := "（120~150 分攻守易位，由原庄家方向新庄家进贡）" if Tribute.is_reversed(score) else ""
+	_add_info("上局抓分方总分 S = %d%s。\n本局由你方向庄家合计进贡 %d 张，由你与队友分摊（§5）。\n贡牌必须是手中最大的非分牌，请选择你贡几张：" % [score, note, total])
 	var top := mini(max_count, suggest_tribute(hand, max_count, level, trump).size())
 	var bottom := mini(min_count, top)
 	_count = bottom
@@ -81,9 +82,19 @@ func open_return(hand: Array[Card], to_name: String, to_seat: int, count: int,
 	_to_seat = to_seat
 	_need = count
 	_selected.clear()
-	_add_info("还贡给 %s：选择 %d 张非分牌副牌（不能还分牌或主牌，§5）。" % [to_name, count])
+	_add_info("对方（上局败方）已向你进贡，你须按各自贡数返还等量的非分牌副牌（§5）。")
+	_add_info("还贡给 %s：选择 %d 张非分牌副牌（不能还分牌或主牌）。" % [to_name, count])
 	var sorted: Array[Card] = hand.duplicate()
+	# 与手牌展示同口径：副牌先按花色分组、组内按点数降序，主牌列右侧
 	sorted.sort_custom(func(a: Card, b: Card) -> bool:
+		var ta := Play.is_trump(a, level, trump)
+		var tb := Play.is_trump(b, level, trump)
+		if ta != tb:
+			return not ta
+		if not ta:
+			if a.suit != b.suit:
+				return a.suit < b.suit
+			return a.rank > b.rank
 		return Play.power(a, level, trump) < Play.power(b, level, trump))
 	for view in _add_card_grid(sorted, level, trump, CARD_SIZE):
 		if _is_returnable(view.card):

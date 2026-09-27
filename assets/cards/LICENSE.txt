@@ -1,0 +1,8 @@
+Playing card face images: Vector Playing Cards
+
+Original author: Byron Knoll, released into the public domain
+  http://byronknoll.blogspot.com/2011/03/vector-playing-cards.html
+SVG source via https://github.com/notpeter/Vector-Playing-Cards
+  (public domain / WTFPL, "do as you see fit")
+
+card_back.svg and card_empty.svg were created for this project (public domain).
